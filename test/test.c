@@ -2,6 +2,7 @@
 #include "test.h"
 #define FOO TEST
 typedef unsigned char foo1, foo2, foo3 ;
+typedef char foo4, foo5, foo6
 typedef char foo4, foo5, foo6;
 typedef char foo7;
  
