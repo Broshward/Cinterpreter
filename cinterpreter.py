@@ -22,7 +22,10 @@ interact=interact()
 driver='UART' # For UART connection interpreter targets
 
 def get_addr_from_elf(name):
-    addr = os.popen('readelf -s %s/main.elf |grep -o \'.*%s$\'' %(PATH,name)).read().strip().split()[1]
+    try:addr = os.popen('readelf -s %s/main.elf |grep -o \'.*%s$\'' %(PATH,name)).read().strip().split()[1]
+    except:
+        print 'Symbol \"%s\" not found in main.elf. Address of \"%s\" cannot be determining.' %(name,name)
+        exit(-1)
     if debug:
         print 'Current function is %s!' %(sys._getframe().f_code.co_name)
         print 'Name = %s, addr = %s' %(name,addr)
@@ -55,34 +58,131 @@ last={'struct':0,'union':0,'enum':0}
 
 #----- Standart base types of C -----------------
 #types={ 'char':1, 'short':2, 'int':4, 'float':4, 'double':8, 'void':0 }
-types={ 'char':'b', 'short':'h', 'int':'w', 'float':4, 'double':8, 'void':0 }
+types={ 'char':1, 'short':2, 'int':4, '*':4, 'float':4, 'double':8, 'void':0 }
 # Simple TYPE is a Number, which described size of type
 
 global_inc=['/usr/include'] # Path to search global system include files
 local_inc=['.']             # Path to search local includes. Equivalent of -I gcc compiler options
 
-def set_var(var,value): # This funtion is interface (driver) of memory or external device content usage
-    global embedded
+def set_var(var,val): # This funtion is interface (driver) of memory or external device content usage
     if debug:
         print 'Current function is %s!' %(sys._getframe().f_code.co_name)
         print 'var = ',var
-        print 'value = ',value
-
-    _type = var['type']
+        print 'value = ',val
     
-    if embedded: #This is temporarily solve. At the time this expressions will changed with universally interface function for interraction with ports and memory
-        if _type.startswith('*'):
-            cmd="Ww:%x=%x" %(var['addr'],value)
-        else:
-            cmd="W%s:%x=%x" %(types[var['type']],var['addr'],value)
-        print cmd
-        #interract.interact(cmd)
-        var['value'] = value
-    else:
-        var['value'] = value
+    var = ''.join(var.split()) # Delete whitespaces
+    var = get_addr(var)
+    #value = get_value(value)
+    print 'Var: ',var
+    print 'Current value: ', hex(value(var))
+    print 'Value to set: ',val
+    value(var,val)
 
-def get_var(var):
-    return
+def size_of_type(typename):
+    return types['*' if typename.startswith('*') else typename]
+
+def value(var,value=None):
+    global embedded,interact
+    if embedded: #This is temporarily solve. At the future this expressions will changed with universally interface function for interraction with ports and memory
+        size = size_of_type(var['type'])
+        if value==None:
+            cmd="R%s:%x" %(size,var['addr'])
+            print cmd
+            return int(interact.interact(cmd)) 
+        elif type(value)==int:
+            #import pdb; pdb.set_trace()
+            cmd="W%s:%x=%x" %(size,var['addr'],value)
+            interact.interact(cmd)
+        else:
+            print 'Value must be a integer!'
+            exit(-1)
+        print cmd
+
+def index_volume(arr_dim): #This function calculate count of cells which is step when index of array increment or decrement. For example: array[4][5], array[i][j]. If i++; then cell count +=5.
+    mul = 1
+    i=0
+    while (i<len(arr_dim)):
+        mul*=arr[i]
+        i+=1
+    return mul
+
+def get_addr(var):
+    global types,cvars
+    if type(var) == str:
+        pseudo_var = {}
+        i=0
+        pointer_power=0
+        elements_of_array=[]
+        while i<len(var):
+            print i
+            if var[i] in '*&':
+                if var[i] == '*':
+                    pointer_power+=1
+                if var[i]=='&':
+                    if pointer_power<0:
+                        print 'error: lvalue required as left operand of assignment'
+                        exit(-1)
+                    else:
+                        pointer_power-=1
+                i+=1
+            elif var[i] == '(': #Type casting
+                beg,end=find_block(var,'(',')')
+                pseudo_var=get_addr(var[beg:end])
+                i+=end
+            elif  'a'<=var[i]<='z' or 'A'<=var[i]<='Z' or var[i]=='_': #The variable name or type name detected
+                name = var[i:].split(None,1)[0]
+                if '[' in name:
+                    name = name.split('[')[0]
+                if name in types.keys():
+                    if 'type' not in pseudo_var.keys():
+                        pseudo_var['type'] = types[name]
+                elif name in cvars.keys():
+                    pseudo_var['addr'] = cvars[name]['addr']
+                    if 'type' not in pseudo_var.keys():
+                        pseudo_var['type'] = cvars[name]['type']
+                i+=len(name)
+            elif var[i]=='[':
+                #import pdb; pdb.set_trace()
+                end=find_block(var[i:],'[',']')[1]
+                elements_of_array.append(eval(var[i+1:i+end]))
+                i+=end+1
+            elif '0'<=var[i]<='9': # The number of address of pseudo_var detected
+                None
+
+        if len(elements_of_array)>0:
+            if len(elements_of_array)>pseudo_var['type'].count('[')+pseudo_var['type'].count('*'):
+                print 'error: subscripted value is neither array nor pointer nor vector\n\t'+var
+                exit(1)
+            else:
+                #pseudo_var['addr']=value(pseudo_var)
+                dimensions_of_array = pseudo_var['type'].split('[')
+                pseudo_var['type'] = dimensions_of_array[0]
+                dimensions_of_array = dimensions_of_array[1:]
+                for i in range(len(elements_of_array)):
+                    if i<len(dimensions_of_array):
+                        if elements_of_array[i] > dimensions_of_array[i]:
+                            print 'warning: index of array is outside of array dimension'
+                        #import pdb; pdb.set_trace()
+                        pseudo_var['addr'] += size_of_type(pseudo_var['type']) * elements_of_array[i] * index_volume(dimensions_of_array[i+1:]) # Multiple of dimensions_of_array[i:]
+                    else:
+                        if pseudo_var['type'].startswith('*'):
+                            pseudo_var['addr']=value(pseudo_var)
+                            pseudo_var['type']=pseudo_var['type'][1:]
+                            pseudo_var['addr']+=size_of_type(pseudo_var['type'])*elements_of_array[i]
+
+        if pointer_power>pseudo_var['type'].count('*'):
+            print "error: invalid type argument of unary '*' (have '%s')" %(pseudo_var['type'].strip('*'))
+            exit(1)
+        while pointer_power>0:
+            pseudo_var['addr']=value(pseudo_var)
+            pseudo_var['type']=pseudo_var['type'][1:]
+            pointer_power-=1
+
+    return pseudo_var
+                
+
+def get_value(value):
+    return value
 
 def if_endif_remove(in_str):
     if debug:
@@ -121,7 +221,10 @@ def find_block(in_str,beg_ch='{',end_ch='}'):
                 break
             power -= 1
         i+=1   
-    return beg,end #begin and end is relative indexes of block
+    if beg==0 and end==0:
+        return None
+    else:
+        return beg,end #begin and end is relative indexes of block
 
 def file_search(dirname,filename):
     if debug:
@@ -342,18 +445,40 @@ def type_search(in_str):
     print 'New type string: \n',type_str
     print
 
-def var_decl(type_name,var_name):
+def var_decl(type_name,var):
     global types,cvars
     if debug:
         print 'Current function is %s' %(sys._getframe().f_code.co_name)
-        print 'type_name = %s, var_name = %s' %(type_name,var_name)
-    if type_name not in types.keys():
-        print 'Error: Type \"%s\" not defined!' %(type_name)
-        exit(-1)
-    if var_name in cvars.keys():
+        print 'type_name = %s, var_name = %s' %(type_name,var)
+    
+#    if type_name not in types.keys():                  # It exists in main loop in launch()
+#        print 'Error: Type \"%s\" not defined!' %(type_name)
+#        exit(-1)
+
+    if '=' in var:
+        var,value = var.split('=',1)
+    else:
+        value = None
+    var = var.strip()
+
+    while var.startswith('*'):
+        var = var[1:]
+        type_name = '*' + type_name
+
+    while '[' in var:
+        beg,end=find_block(var,'[',']')
+        type_name+=var[beg:end]
+        #type_name+='*'+var[beg+1:end].strip()
+        var=var[:beg]+var[end+1:]
+
+    if var in cvars.keys():
         print 'Error: Duplicate variable declaration! \"%s\" = ' %(var_name), cvars[var_name]
         exit(1)
-    cvars[var_name] = {'type':type_name, 'addr':get_addr_from_elf(var_name)}
+    cvars[var] = {'type':type_name, 'addr':get_addr_from_elf(var)}
+    if value:
+        value = eval(value)
+        set_var(var,value)
+
 
 def launch(in_str,autocomplete,parse_file=''):
     global defines, types, cvars
@@ -361,17 +486,23 @@ def launch(in_str,autocomplete,parse_file=''):
         print 'Current function is %s in file %s!' %(sys._getframe().f_code.co_name,parse_file)
     directive_index = 0
     string_num = 0
-    print in_str
+    print '\n\t'+in_str+'\n'
     while directive_index<len(in_str):
-        if in_str[directive_index].isspace() or in_str[directive_index]==';':
+
+        if in_str[directive_index].isspace():
             directive_index += len(in_str[directive_index:]) - len(in_str[directive_index:].lstrip())
+            continue
+        if in_str[directive_index:].startswith(';'):
+            directive_index+=1 
+            continue
 
         exec_str = in_str[directive_index:].split(';',1)[0]
+
         if '{' in exec_str:
             b,e=find_block(in_str[directive_index:])
             exec_str = in_str[e:].find(';')
             exec_str = in_str[directive_index:e+exec_str]
-
+        
         if exec_str.split()[0] == 'typedef':
             # Generate type declaration
             _type = type_decl(exec_str.split(None,1)[1].rsplit('}',1)[0]+'}')
@@ -388,17 +519,25 @@ def launch(in_str,autocomplete,parse_file=''):
 
         if exec_str.split()[0] in types.keys():
             # Var declaration
-            type_name,var_name = exec_str.split()[0:2]
-            var_decl(type_name,var_name)
-            cont = exec_str.find(exec_str.split()[1])
-            in_str = in_str[:directive_index] + in_str[directive_index+cont:]
-            exec_str = exec_str[cont:]
+            type_name,var_names = exec_str.split(None,1)
+            var_names = var_names.split(',')
+            for var_name in var_names:
+                var_decl(type_name,var_name)
+            #cont = exec_str.find(exec_str.split()[1])
+            #in_str = in_str[:directive_index] + in_str[directive_index+cont:]
+            #exec_str = exec_str[cont:]
+            directive_index+=len(exec_str)
+            continue
 
-        if exec_str.split()[0] in cvars.keys():
-            if '=' in exec_str:
-                var,value = exec_str.split('=',1)
-                var = cvars[var.strip()]
-                set_var(var,eval(value))
+        if '=' in exec_str:
+            var,value = exec_str.rsplit('=',1)
+            value = eval(value)
+            var = var.split('=')
+            
+            for i in var:
+                i = i.strip()
+                set_var(i,value)
+                       
 
         if exec_str.split()[0] in ['if','for','while','do']:
             # For if operator and loops
