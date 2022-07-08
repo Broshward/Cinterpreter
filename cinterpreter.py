@@ -51,7 +51,7 @@ def port_setup(dev):
 pre_defines=[] # equivalent of -D compiler options.Example: -Dfoo
 defines={}      # dict of defines in parsing code. Example: #define foo foooo
 files=[]        # List of includes (for log info)
-functions={'strstr':0,'strcpy':0}   # functions contents
+functions={'strstr':0,'strcpy':0,'printf':0}   # functions contents
 
 cvars={}
 last={'struct':0,'union':0,'enum':0}
@@ -132,20 +132,31 @@ def function_calling(func_str):
 #        if len(cmd) > 256:
 #            print 'The string too long'
 #            exit(-1)
-        target_addr=value(haystack)
+
+        if haystack['type'].startswith('*'):
+            haystack['addr']=value(haystack)
+            haystack['type']=haystack['type'][1:]
         #interact.debug=True
         while len(needle)>4: # This crutch here because bug in the Brigdy-OS
             #cmd="Wis:%x=%s" %(target_addr,needle[:7])
             #cmd="Wib:%x=%s" %(target_addr, ','.join(['%x' %(ord(i)) for i in needle[0:7]])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-            cmd="WRiw:%x=%s" %(target_addr, ''.join(['%x' %(ord(i)) for i in needle[0:4][::-1]])) 
+            cmd="WRiw:%x=%s" %(haystack['addr'], ''.join(['%x' %(ord(i)) for i in needle[0:4][::-1]])) 
             print interact.interact(cmd)
             needle=needle[4:]
-            target_addr+=4
+            haystack['addr']+=4
         #cmd="Wis:%x=%s" %(target_addr,needle)
         #cmd="Wib:%x=%s" %(target_addr, ','.join(['%x' %(ord(i)) for i in needle])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        cmd="Wiw:%x=%s" %(target_addr, ''.join(['%x' %(ord(i)) for i in needle[::-1]])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        cmd="Wiw:%x=%s" %(haystack['addr'], ''.join(['%x' %(ord(i)) for i in needle[::-1]])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         interact.interact(cmd)
         #exit() 
+    elif func_name == 'printf': # This is special function!
+        if debug:
+            print 'This function is printf!!'
+        for i in range(1,len(func_args)):
+            func_args[i] = value(get_addr(func_args[i]))
+
+        str=func_args[0] % tuple(func_args[1:])
+        print str
 
 
 def set_var(var,val): # This funtion is interface (driver) of memory or external device content usage
@@ -163,11 +174,17 @@ def set_var(var,val): # This funtion is interface (driver) of memory or external
     value(var,val)
 
 def size_of_type(typename):
+#    if '[' in typename:
+#        typename=typename.split('[')
+#                dimensions_of_array = pseudo_var['type'].split('[')
+#                pseudo_var['type'] = dimensions_of_array[0]
+#                dimensions_of_array = dimensions_of_array[1:]
     return types['*' if typename.startswith('*') else typename]
 
 def value(var,value=None):
     global embedded,interact
     if embedded: #This is temporarily solve. At the future this expressions will changed with universally interface function for interraction with ports and memory
+#        import pdb; pdb.set_trace()
         size = size_of_type(var['type'])
         if value==None:
             cmd="R%s:%x" %(size,var['addr'])
@@ -211,9 +228,8 @@ def get_addr(var):
             elif var[i] == '(': #Type casting
                 beg,end=find_block(var,'(',')')
                 pseudo_var=get_addr(var[beg+1:end])
-                i+=end+1
+                i=end+1
             elif  'a'<=var[i]<='z' or 'A'<=var[i]<='Z' or var[i]=='_': #The variable name or type name detected
-                import pdb; pdb.set_trace()
                 name = var[i:].split(None,1)[0]
                 if '[' in name:
                     name = name.split('[',1)[0]
@@ -240,6 +256,8 @@ def get_addr(var):
                     addr = addr.split('[')[0]
                 if eval(addr):
                     pseudo_var['addr'] = eval(addr)
+                    while pseudo_var['type'].startswith('*'): # Const pointer is array similar data
+                        pseudo_var['type']=pseudo_var['type'][1:]+'[0'
                 else:
                     print 'Address must be a number! Name of var must begins at non digit'
                     exit(-1)
@@ -265,12 +283,15 @@ def get_addr(var):
                             pseudo_var['type']=pseudo_var['type'][1:]
                             pseudo_var['addr']+=size_of_type(pseudo_var['type'])*elements_of_array[i]
 
-        if pointer_power>pseudo_var['type'].count('*'):
-            print "error: invalid type argument of unary '*' (have '%s')" %(pseudo_var['type'].strip('*'))
-            exit(1)
         while pointer_power>0:
-            pseudo_var['addr']=value(pseudo_var)
-            pseudo_var['type']=pseudo_var['type'][1:]
+            if '[' in pseudo_var['type']:
+                pseudo_var['type']=pseudo_var['type'].rsplit('[',1)[0]
+            elif pseudo_var['type'].startswith('*'):
+                pseudo_var['addr']=value(pseudo_var)
+                pseudo_var['type']=pseudo_var['type'][1:]
+            else: 
+                print "error: invalid type argument of unary '*' (have '%s')" %(pseudo_var['type'].strip('*'))
+                exit(1)
             pointer_power-=1
 
     return pseudo_var
@@ -539,7 +560,7 @@ def type_search(in_str):
     print 'New type string: \n',type_str
     print
 
-def var_decl(type_name,var):
+def var_decl(type_name,var,const=False):
     global types,cvars
     if debug:
         print 'Current function is %s' %(sys._getframe().f_code.co_name)
@@ -564,11 +585,16 @@ def var_decl(type_name,var):
         type_name+=var[beg:end]
         #type_name+='*'+var[beg+1:end].strip()
         var=var[:beg]+var[end+1:]
+        #const=True
 
     if var in cvars.keys():
         print 'Error: Duplicate variable declaration! \"%s\" = ' %(var_name), cvars[var_name]
         exit(1)
-    cvars[var] = {'type':type_name, 'addr':get_addr_from_elf(var)}
+
+    if const:
+        cvars[var] = {'type':type_name, 'value':get_addr_from_elf(var)}
+    else:
+        cvars[var] = {'type':type_name, 'addr':get_addr_from_elf(var)}
     if value:
         value = eval(value)
         set_var(var,value)
