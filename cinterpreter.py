@@ -24,8 +24,8 @@ driver='UART' # For UART connection interpreter targets
 def get_addr_from_elf(name):
     try:addr = os.popen('readelf -s %s/main.elf |grep -o \'.*%s$\'' %(PATH,name)).read().strip().split()[1]
     except:
-        print 'Symbol \"%s\" not found in main.elf. Address of \"%s\" cannot be determining.' %(name,name)
-        exit(-1)
+        print 'Symbol \"%s\" not found in main.elf. Address of \"%s\" cannot be determining.\n' %(name,name)
+        return None
     if debug:
         print 'Current function is %s!' %(sys._getframe().f_code.co_name)
         print 'Name = %s, addr = %s' %(name,addr)
@@ -51,7 +51,7 @@ def port_setup(dev):
 pre_defines=[] # equivalent of -D compiler options.Example: -Dfoo
 defines={}      # dict of defines in parsing code. Example: #define foo foooo
 files=[]        # List of includes (for log info)
-functions={}   # functions contents
+functions={'strstr':0,'strcpy':0}   # functions contents
 
 cvars={}
 last={'struct':0,'union':0,'enum':0}
@@ -63,6 +63,90 @@ types={ 'char':1, 'short':2, 'int':4, '*':4, 'float':4, 'double':8, 'void':0 }
 
 global_inc=['/usr/include'] # Path to search global system include files
 local_inc=['.']             # Path to search local includes. Equivalent of -I gcc compiler options
+
+def arg_parsing(arg_str):
+    args=[]
+    while ',' in arg_str:
+        comma_index = arg_str.find(',')
+        quote_index = arg_str.find('"')
+        squote_index = arg_str.find("'")
+        if quote_index == -1:
+            quote_index=len(arg_str)
+        if squote_index == -1:
+            squote_index=len(arg_str)
+        if comma_index < quote_index and comma_index < squote_index:
+            args.append(arg_str[:comma_index])
+            arg_str=arg_str[comma_index+1:]
+        elif quote_index < squote_index and quote_index < comma_index:
+            second_quote = arg_str[quote_index+1:].find('"')
+            if second_quote==-1:
+                print 'Second quote expected! '
+                exit(-1)
+            second_quote += quote_index+1
+            comma_index=arg_str[second_quote:].find(',')
+            if comma_index == -1:
+                break
+            else:
+                args.append(arg_str[:second_quote+comma_index])
+                arg_str=arg_str[second_quote+comma_index+1:]
+    args.append(arg_str)
+    return args
+
+def function_calling(func_str):
+    if debug:
+        print 'Current function is %s!' %(sys._getframe().f_code.co_name)
+        print 'Content is "%s"' %(func_str)
+    func_name,func_args = func_str.split('(',1)
+    func_args=arg_parsing(func_args.rstrip(')'))
+    for i in range(len(func_args)):
+        func_args[i] = func_args[i].strip()
+
+    if func_name == 'strcpy': # This is special function!
+        if len(func_args) != 2:
+            print 'strcpy expect 2 arguments, given %d!' %(len(func_args))
+            exit(-1)
+        haystack=get_addr(func_args[0])
+        if '*' not in haystack['type'] and '[' not in haystack['type']:
+            print 'error:  argument 1 must be pointer or array, given ',haystack['type']
+            exit(-1)
+        if haystack['type'] != '*char' and not haystack['type'].startswith('char['):
+            print 'warning:  argument 1 must be *char or char[], given ',haystack['type']
+        if func_args[1].startswith('"') and func_args[1].endswith('"'):
+            needle=func_args[1][1:-1]+'\0'
+        else:
+            needle=get_addr(func_args[1])
+            if needle['type'] == '*char':
+                cmd = "Ris:%x" %(value(needle))
+            elif needle['type'].startswith('char['):
+                cmd = "Ris:%x" %(needle['addr'])[:-1]
+            else:
+                print 'error:  The argument 2 must be *char or char[], given %s' %(needle['type'])
+            needle=interact.interact(cmd) 
+#        cmd="WRis:%x=%s" %(value(haystack),needle)# Not right working!!!!!!!!!!!!!!!!!!!
+#        cmd="Wib:%x=%s" %(value(haystack), ','.join([str(ord((i))) for i in needle])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!Temporarily solve
+        if debug:
+            print 'haystack = ',haystack
+            print 'needle = "'+needle+'"'
+#            print 'cmd = ',cmd 
+#        if len(cmd) > 256:
+#            print 'The string too long'
+#            exit(-1)
+        target_addr=value(haystack)
+        #interact.debug=True
+        while len(needle)>4: # This crutch here because bug in the Brigdy-OS
+            #cmd="Wis:%x=%s" %(target_addr,needle[:7])
+            #cmd="Wib:%x=%s" %(target_addr, ','.join(['%x' %(ord(i)) for i in needle[0:7]])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            cmd="WRiw:%x=%s" %(target_addr, ''.join(['%x' %(ord(i)) for i in needle[0:4][::-1]])) 
+            print interact.interact(cmd)
+            needle=needle[4:]
+            target_addr+=4
+        #cmd="Wis:%x=%s" %(target_addr,needle)
+        #cmd="Wib:%x=%s" %(target_addr, ','.join(['%x' %(ord(i)) for i in needle])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        cmd="Wiw:%x=%s" %(target_addr, ''.join(['%x' %(ord(i)) for i in needle[::-1]])) #Not right working!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        interact.interact(cmd)
+        #exit() 
+
 
 def set_var(var,val): # This funtion is interface (driver) of memory or external device content usage
     if debug:
@@ -90,7 +174,6 @@ def value(var,value=None):
             print cmd
             return int(interact.interact(cmd)) 
         elif type(value)==int:
-            #import pdb; pdb.set_trace()
             cmd="W%s:%x=%x" %(size,var['addr'],value)
             interact.interact(cmd)
         else:
@@ -127,27 +210,40 @@ def get_addr(var):
                 i+=1
             elif var[i] == '(': #Type casting
                 beg,end=find_block(var,'(',')')
-                pseudo_var=get_addr(var[beg:end])
-                i+=end
+                pseudo_var=get_addr(var[beg+1:end])
+                i+=end+1
             elif  'a'<=var[i]<='z' or 'A'<=var[i]<='Z' or var[i]=='_': #The variable name or type name detected
+                import pdb; pdb.set_trace()
                 name = var[i:].split(None,1)[0]
                 if '[' in name:
-                    name = name.split('[')[0]
+                    name = name.split('[',1)[0]
+                if '*' in name:
+                    asterisk = name[name.find('*'):]
+                    name=name[:name.find('*')]
+                else:
+                    asterisk=''
                 if name in types.keys():
                     if 'type' not in pseudo_var.keys():
-                        pseudo_var['type'] = types[name]
+                        pseudo_var['type'] = asterisk+name
                 elif name in cvars.keys():
                     pseudo_var['addr'] = cvars[name]['addr']
                     if 'type' not in pseudo_var.keys():
                         pseudo_var['type'] = cvars[name]['type']
-                i+=len(name)
+                i+=len(name)+len(asterisk)
             elif var[i]=='[':
-                #import pdb; pdb.set_trace()
                 end=find_block(var[i:],'[',']')[1]
                 elements_of_array.append(eval(var[i+1:i+end]))
                 i+=end+1
-            elif '0'<=var[i]<='9': # The number of address of pseudo_var detected
-                None
+            elif '0'<=var[i]<='9': # The numbering address of pseudo_var detected
+                addr = var[i:].split(None,1)[0]
+                if '[' in addr:
+                    addr = addr.split('[')[0]
+                if eval(addr):
+                    pseudo_var['addr'] = eval(addr)
+                else:
+                    print 'Address must be a number! Name of var must begins at non digit'
+                    exit(-1)
+                i+=len(addr) 
 
         if len(elements_of_array)>0:
             if len(elements_of_array)>pseudo_var['type'].count('[')+pseudo_var['type'].count('*'):
@@ -162,7 +258,6 @@ def get_addr(var):
                     if i<len(dimensions_of_array):
                         if elements_of_array[i] > dimensions_of_array[i]:
                             print 'warning: index of array is outside of array dimension'
-                        #import pdb; pdb.set_trace()
                         pseudo_var['addr'] += size_of_type(pseudo_var['type']) * elements_of_array[i] * index_volume(dimensions_of_array[i+1:]) # Multiple of dimensions_of_array[i:]
                     else:
                         if pseudo_var['type'].startswith('*'):
@@ -395,7 +490,6 @@ def pre_compile(in_str,autocomplete,parse_file=''):
                     for i in local_inc:
                         file_to_parse=file_search(i,inc_str[1:-1])
                         if file_to_parse:
-                            #import pdb; pdb.set_trace()
                             inc_file=open(file_to_parse,'r')
                             parse(inc_file.read(),parse_file=file_to_parse)
                             inc_file.close()
@@ -526,6 +620,11 @@ def launch(in_str,autocomplete,parse_file=''):
             #cont = exec_str.find(exec_str.split()[1])
             #in_str = in_str[:directive_index] + in_str[directive_index+cont:]
             #exec_str = exec_str[cont:]
+            directive_index+=len(exec_str)
+            continue
+
+        if '(' in exec_str and exec_str.split('(',1)[0].strip() in functions.keys(): #function calling
+            function_calling(exec_str.rstrip(';'))
             directive_index+=len(exec_str)
             continue
 
